@@ -34,6 +34,12 @@ while [ ! -b /dev/mmcblk0p1 ] && [ $timeout -gt 0 ]; do
     echo probe mmcblk0p1 $timeout
 done
 
+
+# add pts for telnetd
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts \
+    -o mode=620,ptmxmode=0666
+
 #mount sdcard
 mount /dev/mmcblk0p1 /mnt
 
@@ -43,11 +49,10 @@ busybox telnetd -l /bin/sh &
 
 ##chroot
 mount -o loop /mnt/initramfs_files/squash /squash
-
-
-for i in /dev /proc /sys /run /tmp /var /mnt ; do
+for i in /dev /proc /sys /run /tmp /var ; do
    mount --rbind $i /squash$i
 done
+mount /dev/mmcblk0p1 /squash/mnt
 
 ##setup ZRAM
 echo lz4 > /sys/block/zram0/comp_algorithm
@@ -140,7 +145,7 @@ fi
 
 mtd_mount user /original/usr/
 if [ $? -eq 1 ]; then 
-    mtd_mount user2 /original
+    mtd_mount user2 /original/usr/
     if [ $? -eq 1 ]; then
         echo "Mount original partition failed"
 	touch /original_mount_fail

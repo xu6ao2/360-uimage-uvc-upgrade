@@ -28,7 +28,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip wget
+          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip wget zip
 
       - name: Set timezone
         run: |
@@ -121,12 +121,24 @@ jobs:
               echo "Success, rename uImage.uvc-t31 to uImage.uvc and put it in sdcard to use it."
           else
               echo "Error: uImage.uvc can't be larger than 2048k (2097152), its now" $FILE_SIZE
+              exit 1
           fi
+          
+          mkdir /tmp/t31sd
+          cp -r ../sdcard /tmp/t31sd/
+          cp arch/mips/boot/uImage.lzma /tmp/t31sd/sdcard/uImage.uvc
+
+
+          cd /tmp/t31sd/sdcard/
+          zip -r /tmp/360-t31-initramfs-sd.zip .
+          cd -
+
 
       - name: Upload firmware as artifact
         uses: actions/upload-artifact@v4
         with:
           name: 360-uimage-uvc-upgrader
           path: |
-            /tmp/uImage.lzma-t20
+            #/tmp/uImage.lzma-t20
             /tmp/uImage.uvc-t31
+            /tmp/360-t31-initramfs-sd.zip
