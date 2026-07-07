@@ -1,312 +1,174 @@
 #!/bin/sh
 
-set -x
-
-exec 1> /tmp/wz_mini_initramfs.log 2>&1
-
-# Start LED script and get its process ID
-/led.sh &
-led_pid="$!"
-
-check_prereq() {
-	command -v $1 > /dev/null && return
-	echo "Cannot find $1."
-	exit 1
-}
-
-uniflasher() {
-check_prereq dd
-check_prereq flashcp
-
-firmware="/sdcard/autoupdate-full.yay"
-if [ -z "$firmware" ]; then
-	echo "Usage: $0 <path to firmware file>"
-	exit 1
-fi
-
-# stop services
-killall majestic httpd ntpd crond || true
-
-mtd_num=0
-needle=0
-align_block=$((32 * 1024))
-fw_size=$(cat $firmware | wc -c)
-
-for size_hex in $(awk 'NR>1{print $2}' /proc/mtd); do
-	[ "$needle" -ge "$fw_size" ] && break
-
-	echo "mtd$mtd_num"
-	echo "----------"
-	partfile=/tmp/mtd${mtd_num}.bin
-
-	echo " Extracting block of $size_dec bytes starting at $needle"
-	size_dec=$((0x$size_hex))
-	dd if=$firmware of=$partfile bs=$align_block skip=$((needle/align_block)) count=$((size_dec/align_block))
-
-	echo " Flashing partition mtd${mtd_num}"
-	flashcp -v $partfile /dev/mtd${mtd_num}
-
-	rm $partfile
-	needle=$((needle + size_dec))
-	mtd_num=$((mtd_num + 1))
-	echo
-done
-}
-
-
-# Function to generate a backup directory
-generate_backup_dir() {
-	base_dir="/sdcard"
-	template="$base_dir/WYZE_BACKUP_XXXXXX"
-
-	# Create a unique temporary directory
-	backup_dir=$(mktemp -d -p "$base_dir" "WYZE_BACKUP_XXXXXX" 2>/dev/null)
-	if [ -z "$backup_dir" ]; then
-		echo "Error: Unable to create a unique directory in $base_dir."
-		exit 1
-	fi
-
-	echo "$backup_dir"
-}
-
-# Function to backup MTD partitions
-backup_mtd_partitions() {
-		mtd_file="/proc/mtd"
-		log_file="/tmp/wz_mini_initramfs.log"
-		backup_dir=$(generate_backup_dir)
-		status_file="$backup_dir/STATUS"
-		log_backup="$backup_dir/wz_mini_initramfs.log"
-		combined_file="$backup_dir/combined_backup.bin"
-
-		# Check if /proc/mtd exists
-		if [ ! -f "$mtd_file" ]; then
-				echo "Error: $mtd_file not found. Are you running on a system with MTD partitions?" > "$status_file"
-				cp "$log_file" "$log_backup" 2>/dev/null
-				exit 1
-		fi
-
-		# Create the combined file
-		> "$combined_file"
-
-		# Read and process each line in /proc/mtd
-		while read -r line; do
-				case "$line" in
-						mtd[0-9]*)
-								mtd_number=$(echo "$line" | cut -d: -f1)
-								mtd_name=$(echo "$line" | cut -d\" -f2)
-								output_file="$backup_dir/${mtd_number}.bin"
-
-								echo "Backing up $mtd_number ($mtd_name) to $output_file..."
-
-								# Dump partition to a file
-								if ! dd if="/dev/$mtd_number" of="$output_file" bs=4096 conv=fsync 2>/dev/null; then
-										echo "Error: Failed to backup $mtd_number." > "$status_file"
-										cp "$log_file" "$log_backup" 2>/dev/null
-								fi
-
-								# Generate SHA256 checksum for the dumped file
-								dumped_sha=$(sha256sum "$output_file" | awk '{print $1}')
-								echo "$dumped_sha  $output_file" > "$output_file.sha256"
-
-								# Generate SHA256 checksum for the live MTD partition
-								mtd_sha=$(dd if="/dev/$mtd_number" bs=4096 conv=fsync 2>/dev/null | sha256sum | awk '{print $1}')
-
-								# Compare checksums
-								if [ "$dumped_sha" != "$mtd_sha" ]; then
-										echo "Error: Checksum mismatch for $mtd_number. Backup may be corrupted." > "$status_file"
-										cp "$log_file" "$log_backup" 2>/dev/null
-								fi
-
-								# Append the current partition dump to the combined file
-								cat "$output_file" >> "$combined_file"
-
-								echo "Backup and checksum validation completed for $mtd_number."
-								;;
-				esac
-		done < "$mtd_file"
-
-		# Generate checksum for the combined file
-		combined_sha=`sha256sum "$combined_file" | awk '{print $1}'`
-		echo "$combined_sha  $combined_file" > "$combined_file.sha256"
-
-		echo "All partitions have been concatenated into $combined_file."
-}
-
-# Main script execution starts here
-echo "Welcome to wz_mini initramfs for Thingino"
-
-# Mount necessary filesystems for initramfs
+mkdir /dev /proc /sys /run /tmp /var /mnt /squash
+# Preferred: devtmpfs (kernel auto-populates /dev)
 mount -t devtmpfs devtmpfs /dev
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
 
-# Required delay on T20/T31 platform
-sleep 1
 
-echo "Check for T20 platform"
+# Mount kernel filesystems
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
 
-# Check for T20 platform using /dev/mtdblock10
+mount -t tmpfs -o size=64m tmpfs /run
+mount -t tmpfs -o size=64m tmpfs /tmp
+mount -t tmpfs -o size=64m tmpfs /var
+
+mount -t debugfs none /sys/kernel/debug
+
+#detection
 if [ "$(/sbin/soc -f)" = "t20" ]; then
-	echo "Found T20"
+        insmod /lib/sinfo_t20.ko
+fi
+if [ "$(/sbin/soc -f)" = "t31" ]; then
+        insmod /lib/sinfo_t31.ko
+fi
+gpio-diag show >> /tmp/gpio-diag-output
+echo 1 > /proc/jz/sinfo/info &
 
-	# T20: Need to export the SD card enable GPIO manually
-	echo 43 > /sys/class/gpio/export
-	echo in > /sys/class/gpio/gpio43/direction
 
-	# T20: Insert required delay for SD card init
-	sleep 3
+#Waiting devtmpfs mount
+timeout=50
+while [ ! -b /dev/mmcblk0p1 ] && [ $timeout -gt 0 ]; do
+    sleep 0.01
+    timeout=$((timeout - 1))
+    echo probe mmcblk0p1 $timeout
+done
+
+#mount sdcard
+mount /dev/mmcblk0p1 /mnt
+
+#start telnet
+busybox telnetd -l /bin/sh &
+
+
+##chroot
+mount -o loop /mnt/initramfs_files/squash /squash
+
+
+for i in /dev /proc /sys /run /tmp /var /mnt ; do
+   mount --rbind $i /squash$i
+done
+
+##setup ZRAM
+echo lz4 > /sys/block/zram0/comp_algorithm
+echo 128M > /sys/block/zram0/disksize
+mkswap /dev/zram0
+swapon /dev/zram0
+
+
+##custom script
+/mnt/initramfs_files/initramfsrun.sh &
+
+##eth
+ifup eth0
+udhcpc -i eth0 &
+
+##usb_cdc
+usb-role -m device
+ifconfig usb0 172.16.1.1 netmask 255.255.255.0 up
+udhcpd /etc/udhcpd-usb.conf &
+
+##fix atbm6031 load
+ln -s /bin/busybox /sbin/mdev
+mkdir /lib/firmware
+mount /squash/lib/firmware /lib/firmware
+mkdir /usr/share/wifi
+mount /squash/usr/share/wifi /usr/share/wifi
+
+
+
+##ftpd
+tcpsvd -vE 0.0.0.0 21 ftpd -w -A  / &
+
+
+
+
+
+
+##mount original firmware to /original
+mtd_mount() {
+    local part_name="$1"
+    local mount_point="$2"
+    local mtd_line mtd_num block_dev
+
+    # Validate input arguments
+    if [ -z "$part_name" ] || [ -z "$mount_point" ]; then
+        echo "Usage: mtd_mount <partition_name> <mount_point>"
+        return 1
+    fi
+
+    # Find the MTD line matching the partition name
+    mtd_line=$(grep "\"$part_name\"" /proc/mtd)
+    if [ -z "$mtd_line" ]; then
+        echo "Error: MTD partition '$part_name' not found."
+        return 1
+    fi
+
+    # Extract the device number
+    mtd_num=$(echo "$mtd_line" | cut -d':' -f1 | sed 's/mtd//')
+    block_dev="/dev/mtdblock$mtd_num"
+
+    # Verify block device node exists
+    if [ ! -b "$block_dev" ]; then
+        echo "Error: Block device $block_dev does not exist."
+        return 1
+    fi
+
+    # Create mount folder and execute mount operation
+    mkdir -p "$mount_point"
+    echo "Mounting $block_dev ($part_name) to $mount_point..."
+    
+    if mount "$block_dev" $mount_point ; then
+        echo "Successfully mounted $part_name."
+        return 0
+    else
+        echo "Error: Failed to mount $block_dev."
+        return 1
+    fi
+}
+
+mkdir /original
+
+mtd_mount rootfs /original
+if [ $? -eq 1 ]; then 
+    mtd_mount rootfs2 /original
+    if [ $? -eq 1 ]; then
+        echo "Mount original partition failed"
+	touch /original_mount_fail
+    fi
 fi
 
-# Initialize GPIOs for the Wi-Fi module if not already initialized
-if ! [ -d /sys/class/gpio/gpio38 ]; then
-	echo 38 > /sys/class/gpio/export
-	echo out > /sys/class/gpio/gpio38/direction
-	echo 1 > /sys/class/gpio/gpio38/value
+mtd_mount user /original/usr/
+if [ $? -eq 1 ]; then 
+    mtd_mount user2 /original
+    if [ $? -eq 1 ]; then
+        echo "Mount original partition failed"
+	touch /original_mount_fail
+    fi
 fi
 
-if ! [ -d /sys/class/gpio/gpio39 ]; then
-	echo 39 > /sys/class/gpio/export
-	echo out > /sys/class/gpio/gpio39/direction
-	echo 1 > /sys/class/gpio/gpio39/value
-fi
-
-# Detect hardware and log version information
-echo "Detecting hardware"
-sbin/soc -m > /tmp/SOC_VERSION
-if [ "$(/sbin/soc -f)" = "t20" ]; then
-	insmod /lib/sinfo_t20.ko
-else
-	insmod /lib/sinfo_t31.ko
-fi
-sleep 1
-echo 1 > /proc/jz/sinfo/info
-sleep 10
-dmesg | grep Success > /tmp/SENSOR_VER
-
-# Check if the SOC is t31a and handle Wi-Fi GPIO accordingly
-if [ "$(/sbin/soc -m)" = "t31a" ]; then
-	echo "Skipping Wi-Fi GPIO setup, SOC is t31a"
-else
-	/bin/gpio-diag pb08 func 1 drive 2
-	/bin/gpio-diag pb09 func 1 drive 1
-	/bin/gpio-diag pb10 func 1 drive 1
-	/bin/gpio-diag pb11 func 1 drive 1
-	/bin/gpio-diag pb13 func 1 drive 1
-	/bin/gpio-diag pb14 func 1 drive 1
-fi
-
-# Perform SD card insertion and log Wi-Fi module vendor and device
-sleep 1
-echo INSERT > /sys/devices/platform/jzmmc_v1.2.1/present
-sleep 1
-
-echo "vendor: $(cat /sys/devices/platform/jzmmc_v1.2.1/mmc_host/mmc1/mmc1:0001/mmc1:0001:1/vendor)" >> /tmp/WIFI_MODULE
-echo "device: $(cat /sys/devices/platform/jzmmc_v1.2.1/mmc_host/mmc1/mmc1:0001/mmc1:0001:1/device)" >> /tmp/WIFI_MODULE
-#echo REMOVE > /sys/devices/platform/jzmmc_v1.2.1/present
-
-# Insert SD card and mount it
-sleep 1
-echo INSERT > /sys/devices/platform/jzmmc_v1.2.0/present
-sleep 1
-
-mkdir -p /sdcard
-mount -t vfat /dev/mmcblk0p1 /sdcard -o rw,umask=0000,dmask=0000
-
-# Disable installer so it an't run a second time
-mv /sdcard/factory_t31_ZMC6tiIDQN /sdcard/factory_t31_ZMC6tiIDQN.old
-mv /sdcard/factory_ZMC6tiIDQN /sdcard/factory_ZMC6tiIDQN.old
-
-# Set up our firmware before we make our backup
-sensor_name=$(cat /tmp/SENSOR_VER | sed -n 's/.*Successful sensor detection: \([^,]*\),.*/\1/p')
-# Convenience rename
-echo "Starting hardware check for filerename on Wyze V2 and V3"
-if [ "$(/sbin/soc -f)" = "t20" ]; then
-	# Check for jxf23
-	if [ "$sensor_name" = "jxf23" ] && [ -f "/sdcard/thingino-wyze_cam2_t20x_jxf23_rtl8189ftv.bin" ]; then
-		mv "/sdcard/thingino-wyze_cam2_t20x_jxf23_rtl8189ftv.bin" "/sdcard/autoupdate-full.yay"
-	# Check for jxf22
-	elif [ "$sensor_name" = "jxf22" ] && [ -f "/sdcard/thingino-wyze_cam2_t20x_jxf22_rtl8189ftv.bin" ]; then
-		mv "/sdcard/thingino-wyze_cam2_t20x_jxf22_rtl8189ftv.bin" "/sdcard/autoupdate-full.yay"
-	# Check for jxf22 for cam pan v1
-	elif [ "$sensor_name" = "jxf22" ] && [ -f "/sdcard/thingino-wyze_campan1_t20x_jxf22_rtl8189etv.bin" ]; then
-		mv "/sdcard/thingino-wyze_campan1_t20x_jxf22_rtl8189etv.bin" "/sdcard/autoupdate-full.yay"
-
-	else
-		echo "Error: No matching firmware file found for t20, skipping rename."
-	fi
-elif [ "$(/sbin/soc -f)" = "t31" ]; then
-	if [ "$(/sbin/soc -m)" = "t31al" ] && [ -f "/sdcard/thingino-wyze_cam3_t31al_gc2053_atbm6031.bin" ]; then
-		mv "/sdcard/thingino-wyze_cam3_t31al_gc2053_atbm6031.bin" "/sdcard/autoupdate-full.yay"
-	elif grep -q "0x007a" /tmp/WIFI_MODULE 2>/dev/null && [ -f "/sdcard/thingino-wyze_cam3_t31x_gc2053_atbm6031.bin" ]; then
-		mv "/sdcard/thingino-wyze_cam3_t31x_gc2053_atbm6031.bin" "/sdcard/autoupdate-full.yay"
-		echo "Altobeam ATBM" >> /tmp/WIFI_MODULE
-	elif [ -f "/sdcard/thingino-wyze_cam3_t31x_gc2053_rtl8189ftv.bin" ]; then
-		mv "/sdcard/thingino-wyze_cam3_t31x_gc2053_rtl8189ftv.bin" "/sdcard/autoupdate-full.yay"
-		echo "Realtek RTL" >> /tmp/WIFI_MODULE
-	# cam pan v2
-	elif [ -f "/sdcard/thingino-wyze_campan2_t31x_gc2053_atbm6031.bin" ]; then
-		mv "/sdcard/thingino-wyze_campan2_t31x_gc2053_atbm6031.bin" "/sdcard/autoupdate-full.yay"
-		echo "Realtek RTL" >> /tmp/WIFI_MODULE
-
-	else
-		echo "Error: No matching firmware file found for t31, skipping rename."
-	fi
-fi
-
-
-# Perform MTD partition backup
-sleep 1
-backup_mtd_partitions
-
-# Copy logs to backup directory
-cp /tmp/* "$backup_dir"
-
-# Erase MTD partition and finalize backup process
-#echo "Erasing..."
-#flash_eraseall /dev/mtd0
-#echo "mtd0 erasing completed"
-if [ -e /sdcard/autoupdate-full.yay ]; then
-	uniflasher
-fi
-
-#echo "Erase Flash thingino u-boot"
-#if [ "$(/sbin/soc -f)" = "t20" ]; then
-#	flashcp -v /root/u-boot-isvp_t20_sfcnor_lite.bin /dev/mtd0
-#elif [ "$(/sbin/soc -f)" = "t31" ]; then
-#	flashcp -v /root/u-boot-isvp_t31_sfcnor_ddr128M.bin /dev/mtd0
-#else
-#	echo "SoC not supported in this installer"
+#mtd_mount mtd "/original/system_rw/ -t jffs2"
+#if [ $? -eq 1 ]; then 
+#    echo "Mount original partition failed"
+#    touch /original_mount_fail
 #fi
 
 
 
-# Reboot and clean up
-echo "Rebooting..."
+
+if [ ! -e /original_mount_fail ]; then
+    ln -s /original/lib/ld-uClibc.so.0 /lib/ld-uClibc.so.0
+    ln -s /original/lib/libc.so.0  /lib/libc.so.0
+    ln -s /original/usr/sbin/mtd_debug /sbin/mtd_debug
+    ln -s /original/usr/bin/nvram_get /bin/nvram_get
+fi
 
 
-cp "$log_file" "$log_backup" 2>/dev/null
 
-# Sync file systems and unmount the SD card. sync flushes buffers at least from the filesystem layer but I don't trust the sd card driver to do the right thing without coaxing
-echo "First sync"
-sync
-echo "umount"
-umount /sdcard
-umount -f /sdcard
-echo "second sync"
-sync
 
-# Let's do a few extra steps to encourage the sd controller to do the right thing
-echo "bonus dd read from mmc"
-dd if=/dev/mmcblk0 bs=1k  count=256 skip=1024  of=/dev/null 
-# totally not hacky at all but let's just read the first 256k of the vfat. someone of stackoverflow claimed this fixed their unclean filesystem after unmount
-echo "bonus sleep 10"
-sleep 10 # silly sd just do the right thing please
-echo "final sync"
-sync
 
-# Kill the LED process
-kill $led_pid
 
-# Reset the system using watchdog, this is harsh
-echo "wdt reset"
-echo wdt > /proc/jz/reset/reset
+
+
+
+/bin/sh

@@ -1,10 +1,10 @@
-name: wz_neos_upgrade
+name: 360_uimage_uvc_upgrade
 
 on:
   workflow_dispatch:
 
 env:
-  TAG_NAME: wz-neos
+  TAG_NAME: 360-uimage-uvc
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   TERM: linux
   TZ: America/Los_Angeles
@@ -28,7 +28,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip
+          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip wget
 
       - name: Set timezone
         run: |
@@ -61,9 +61,9 @@ jobs:
 
       - name: Download toolchain
         run: |
-          curl -L https://github.com/themactep/thingino-firmware/releases/download/toolchain-x86_64/thingino-toolchain-x86_64_xburst1_musl_gcc14-linux-mipsel.tar.gz -o ~/thingino-toolchain_xburst1_musl_gcc14-linux-mipsel.tar.gz
-          tar -xf ~/thingino-toolchain_xburst1_musl_gcc14-linux-mipsel.tar.gz -C ~/
-          ~/mipsel-thingino-linux-musl_sdk-buildroot/relocate-sdk.sh
+          curl -L https://github.com/themactep/thingino-firmware/releases/download/toolchain-x86_64/thingino-toolchain-x86_64_xburst1_uclibc_gcc15-linux-mipsel.tar.gz -o ~/thingino-toolchain_xburst1_uclibc_gcc15-linux-mipsel.tar.gz
+          tar -xf ~/thingino-toolchain_xburst1_uclibc_gcc15-linux-mipsel.tar.gz -C ~/
+          ~/mipsel-thingino-linux-uclibc_sdk-buildroot/relocate-sdk.sh
 
       - name: Configure ccache
         if: ${{ github.event.inputs.debug_enabled != 'true' }}
@@ -75,10 +75,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p initramfs/root
-          curl -L https://github.com/themactep/thingino-firmware/releases/latest/download/thingino-xiaomi_xiaofang_t20l_jxf23_rtl8189ftv.bin -o initramfs/root/u-boot-isvp_t20_sfcnor_lite.bin
-          truncate -s 262144 initramfs/root/u-boot-isvp_t20_sfcnor_lite.bin
-          curl -L https://github.com/themactep/thingino-firmware/releases/latest/download/thingino-wyze_cam3_t31x_gc2053_atbm6031.bin -o initramfs/root/u-boot-isvp_t31_sfcnor_ddr128M.bin
-          truncate -s 262144 initramfs/root/u-boot-isvp_t31_sfcnor_ddr128M.bin
+          #curl -L https://github.com/themactep/thingino-firmware/releases/latest/download/thingino-xiaomi_xiaofang_t20l_jxf23_rtl8189ftv.bin -o initramfs/root/u-boot-isvp_t20_sfcnor_lite.bin
+          #truncate -s 262144 initramfs/root/u-boot-isvp_t20_sfcnor_lite.bin
+          #curl -L https://github.com/themactep/thingino-firmware/releases/latest/download/thingino-wyze_cam3_t31x_gc2053_atbm6031.bin -o initramfs/root/u-boot-isvp_t31_sfcnor_ddr128M.bin
+          #truncate -s 262144 initramfs/root/u-boot-isvp_t31_sfcnor_ddr128M.bin
 
       - name: Clone kernel repository
         if: ${{ github.event.inputs.debug_enabled != 'true' }}
@@ -86,6 +86,10 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/gtxaspec/thingino-linux -b ingenic-t31
           cp kernel_configs/* thingino-linux/arch/mips/configs/
+          cd kernel_configs/
+          wget https://raw.githubusercontent.com/themactep/thingino-firmware/refs/heads/master/board/ingenic/xburst1/kernel/3.10.14/t31.generic.config
+          cat t31.generic.config initramfs.config usb.config eth.config mmc.config wireless.config tools.config slim.config > ../thingino-linux/arch/mips/configs/isvp_360_t31_uvc_defconfig
+          cd ..
 
       - name: Create initramfs root layout
         if: ${{ github.event.inputs.debug_enabled != 'true' }}
@@ -96,26 +100,33 @@ jobs:
         if: ${{ github.event.inputs.debug_enabled != 'true' }}
         shell: bash
         run: |
-          export PATH="/github/home/mipsel-thingino-linux-musl_sdk-buildroot/bin:$PATH"
+          export PATH="/github/home/mipsel-thingino-linux-uclibc_sdk-buildroot/bin:$PATH"
           cd thingino-linux
           make isvp_bull_mini_defconfig
           CROSS_COMPILE="ccache mipsel-linux-" make -j$(nproc) uImage
           cp arch/mips/boot/uImage.lzma /tmp/uImage.lzma-t20
 
-      - name: Build T31 kernel
+      - name: Build T31 uImage.uvc
         if: ${{ github.event.inputs.debug_enabled != 'true' }}
         shell: bash
         run: |
-          export PATH="/github/home/mipsel-thingino-linux-musl_sdk-buildroot/bin:$PATH"
+          export PATH="/github/home/mipsel-thingino-linux-uclibc_sdk-buildroot/bin:$PATH"
           cd thingino-linux
-          make isvp_swan_mini_defconfig
+          make isvp_360_t31_uvc_defconfig
           CROSS_COMPILE="ccache mipsel-linux-" make -j$(nproc) uImage
-          cp arch/mips/boot/uImage.lzma /tmp/uImage.lzma-t31
+          FILE_SIZE=$(stat -c %s "arch/mips/boot/uImage.lzma")
+          MAX_SIZE=2097152
+          if [ "$FILE_SIZE" -lt "$MAX_SIZE" ]; then
+              cp arch/mips/boot/uImage.lzma /tmp/uImage.uvc-t31
+              echo "Success, rename uImage.uvc-t31 to uImage.uvc and put it in sdcard to use it."
+          else
+              echo "Error: uImage.uvc can't be larger than 2048k (2097152), its now" $FILE_SIZE
+          fi
 
       - name: Upload firmware as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wz-neos-upgrader
+          name: 360-uimage-uvc-upgrader
           path: |
             /tmp/uImage.lzma-t20
-            /tmp/uImage.lzma-t31
+            /tmp/uImage.uvc-t31
