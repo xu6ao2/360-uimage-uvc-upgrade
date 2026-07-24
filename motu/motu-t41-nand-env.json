@@ -1,0 +1,11 @@
+{
+  "vars": {
+    "baudrate": "115200",
+    "bootcmd": "env default -a;env save;fatload mmc 0:1 0x80600000 motu-t41-nand.uImage;bootm 0x80600000",
+    "bootdelay": "3",
+    "stderr": "serial",
+    "stdin": "serial",
+    "stdout": "serial"
+  },
+  "size": 131072
+}
