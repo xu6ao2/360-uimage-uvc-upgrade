@@ -28,7 +28,12 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip wget zip
+          apt-get install -y --no-install-recommends --no-install-suggests 7zip build-essential bc ccache cpio curl ca-certificates file git gh jq make gawk lzop procps rsync tzdata u-boot-tools unzip wget zip python3 
+
+      - name: Install UPX
+        uses: crazy-max/ghaction-upx@v4
+        with:
+          install-only: true
 
       - name: Set timezone
         run: |
@@ -112,6 +117,7 @@ jobs:
         run: |
           export PATH="/github/home/mipsel-thingino-linux-uclibc_sdk-buildroot/bin:$PATH"
           cd thingino-linux
+          git apply ../kernel_patches/t31-mmc-remove-fix.patch
           make isvp_360_t31_uvc_defconfig
           CROSS_COMPILE="ccache mipsel-linux-" make -j$(nproc) uImage
           FILE_SIZE=$(stat -c %s "arch/mips/boot/uImage.lzma")
@@ -132,6 +138,52 @@ jobs:
           cd /tmp/t31sd/sdcard/
           zip -r /tmp/360-t31-initramfs-sd.zip .
           cd -
+          rm -rf /tmp/t31sd/
+
+      - name: Build for motu k7ts t41nq nand
+        if: ${{ github.event.inputs.debug_enabled != 'true' }}
+        shell: bash
+        run: |
+          export PATH="/github/home/mipsel-thingino-linux-uclibc_sdk-buildroot/bin:$PATH"
+
+          #change to t41
+          rm -rf thingino-linux
+          git clone --depth 1 https://github.com/gtxaspec/thingino-linux -b ingenic-t41-4.4.94
+
+          cat ./kernel_configs/t41.generic.config ./kernel_configs/nand.fragment ./kernel_configs/initramfs_motu.config ./kernel_configs/tools.config  > thingino-linux/arch/mips/configs/isvp_motu_t41nq_nand_360_k7ts_defconfig
+          cp ./kernel_patches/k7ts.dts ./thingino-linux/arch/mips/boot/dts/ingenic/marmot.dts
+
+          #make nand env to load initramfs
+          cp ./motu/env_tools_linux_x86 ./motu/k7ts/
+          cp ./motu/motu-t41-nand-env.json ./motu/k7ts/nand-env.json
+          cp ./motu/mtpt_nand_env.py ./motu/k7ts/
+          cd ./motu/k7ts/
+          ./env_tools_linux_x86 -b ./nand-env.json
+          python3 ./mtpt_nand_env.py
+          cd -
+
+
+          #add busybox with more function.
+          wget https://github.com/gtxaspec/wyze-neos-upgrade/raw/refs/heads/master/initramfs/bin/busybox
+          cp ./busybox ./initramfs/bin/busybox
+          upx -d ./initramfs/bin/busybox
+          chmod 0755 ./initramfs/bin/busybox
+          ./initramfs_create.sh
+
+          cd thingino-linux
+          make isvp_motu_t41nq_nand_360_k7ts_defconfig
+          CROSS_COMPILE="ccache mipsel-linux-" make -j$(nproc) uImage
+
+          mkdir /tmp/motusd
+          cp -r ../motu/k7ts/sdcard/ /tmp/motusd/
+          cp arch/mips/boot/uImage.lzma /tmp/motusd/sdcard/motu-t41-nand.uImage
+          cp ../motu/k7ts/nand-env.mtpt /tmp/motusd/sdcard/update.mtpt
+
+
+          cd /tmp/motusd/sdcard/
+          zip -r /tmp/motu-360-k7ts-initramfs-sd.zip .
+          cd -
+          rm -rf /tmp/motusd/
 
 
       - name: Upload firmware as artifact
@@ -142,3 +194,4 @@ jobs:
             #/tmp/uImage.lzma-t20
             /tmp/uImage.uvc-t31
             /tmp/360-t31-initramfs-sd.zip
+            /tmp/motu-360-k7ts-initramfs-sd.zip

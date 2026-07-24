@@ -1,0 +1,13 @@
+#diff output/master/360_k7ts_t41nq_gc4023_eth-4.4.94-uclibc/.config.old output/master/360_k7ts_t41nq_gc4023_eth-4.4.94-uclibc/.config |grep \>
+> BR2_PACKAGE_ESPEAK=y
+> BR2_PACKAGE_ESPEAK_AUDIO_BACKEND_NONE=y
+> # BR2_PACKAGE_ESPEAK_AUDIO_BACKEND_ALSA is not set
+> # BR2_PACKAGE_ESPEAK_AUDIO_BACKEND_PULSEAUDIO is not set
+> BR2_PACKAGE_GESFTPSERVER=y
+> BR2_THINGINO_LIBSTDCPP=y
+
+#diff output/master/360_k7ts_t41nq_gc4023_eth-4.4.94-uclibc/.config.old output/master/360_k7ts_t41nq_gc4023_eth-4.4.94-uclibc/.config |grep -v '#' |grep \> |tr '>' '\0' |tr ' ' '\0'
+BR2_PACKAGE_ESPEAK=y
+BR2_PACKAGE_ESPEAK_AUDIO_BACKEND_NONE=y
+BR2_PACKAGE_GESFTPSERVER=y
+BR2_THINGINO_LIBSTDCPP=y
